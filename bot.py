@@ -1,167 +1,202 @@
-# -*- coding: utf-8 -*-
-# Braster Empire — Kraken USD‑only Multi‑Pair Bot
-# - scant ALLE /USD pairs (NO USDT)
-# - 15m breakout + EMA(12/26) trendfilter
-# - TP/SL + altijd‑aan trailing stop (softwarematig)
-# - ccxt is de enige dependency
-
-import os, time
+# bot.py — Donchian + EMA200 + ATR Trailing (Kraken / ccxt)
+import os, time, math
 from datetime import datetime
 import ccxt
 
-def env(k, d=None, cast=str):
-    v = os.getenv(k, d)
-    if v is None: raise RuntimeError(f"ENV {k} ontbreekt")
-    if cast is bool:  return str(v).lower() in ("1","true","yes","y","on")
-    if cast is int:   return int(float(v))
-    if cast is float: return float(v)
-    return v
+# ---------- helpers ----------
+def env(name, default=None, cast=str):
+    v = os.getenv(name, default)
+    if v is None:
+        raise RuntimeError(f"ENV {name} ontbreekt")
+    if cast is bool:
+        return str(v).lower() in ("1","true","yes","y","on")
+    return cast(v)
 
 def now(): return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 def ema(vals, n):
-    k = 2.0/(n+1.0); out=[]; prev=None
+    k = 2.0/(n+1.0)
+    out, prev = [], None
     for x in vals:
-        prev = x if prev is None else prev + k*(x-prev)
+        prev = x if prev is None else (prev + k*(x-prev))
         out.append(prev)
     return out
 
-# -------- ENV --------
-API_KEY        = env("KRAKEN_API_KEY")
-API_SECRET     = env("KRAKEN_API_SECRET")
-PAIR           = env("PAIR", "all")             # "all" of bv "BTC/USD,ETH/USD,XRP/USD"
-FUTURES        = env("FUTURES", "false", bool)  # spot long‑only; futures = short/lev mogelijk
-LEVERAGE       = env("LEVERAGE", "1", float)
+def atr_from_ohlcv(high, low, close, period=14):
+    trs = []
+    prev = close[0]
+    for h,l,c in zip(high, low, close):
+        tr = max(h-l, abs(h-prev), abs(l-prev))
+        trs.append(tr)
+        prev = c
+    return ema(trs, period)
 
-BASE_SIZE_USD  = env("BASE_SIZE_USD", "50", float)
-TIMEFRAME      = env("TIMEFRAME", "15m")
-TP_PCT         = env("TP_PCT", "1.5", float)    # take profit %
-SL_PCT         = env("SL_PCT", "0.7", float)    # stop loss %
-TRAIL_PCT      = env("TRAIL_PCT", "0.3", float) # trailing afstand %
-ORDER_TYPE     = env("ORDER_TYPE", "limit")     # limit/market
-LIMIT_OFF_PCT  = env("LIMIT_OFFSET_PCT", "0.03", float)  # limit beter dan last
-COOLDOWN_S     = env("COOLDOWN_S", "60", int)
-DRY_RUN        = env("DRY_RUN", "true", bool)   # zet op false voor live
+def donchian(hi, lo, n):
+    n = int(n)
+    return max(hi[-n:]), min(lo[-n:])
 
-# -------- Exchange --------
-ex = ccxt.krakenfutures({'apiKey':API_KEY,'secret':API_SECRET,'enableRateLimit':True}) if FUTURES else \
-     ccxt.kraken({'apiKey':API_KEY,'secret':API_SECRET,'enableRateLimit':True})
+# ---------- config ----------
+API_KEY       = env("KRAKEN_API_KEY")
+API_SECRET    = env("KRAKEN_API_SECRET")
+FUTURES       = env("FUTURES", "true", bool)          # true=futures, false=spot
+PAIR          = env("PAIR", "ETH/USD")                # bv. ETH/USD (spot) of ETH/USD:USD (futures)
+TIMEFRAME     = env("TIMEFRAME", "15m")
+EMA_N         = env("EMA_N", "200", int)
+DONCHIAN_N    = env("DONCHIAN_N", "55", int)
+ATR_N         = env("ATR_N", "14", int)
+ATR_MULT      = env("ATR_MULT", "3.0", float)         # trailing afstand in ATR's (3.0 is klassiek)
+ORDER_TYPE    = env("ORDER_TYPE", "market")           # market|limit
+LIMIT_BPS     = env("LIMIT_BPS", "5", float)          # 5 bps = 0.05% betere prijs bij limit
+BASE_SIZE_USD = env("BASE_SIZE_USD", "50", float)     # doel-ordergrootte in USD
+MAX_LOSS_USD  = env("MAX_LOSS_USD", "25", float)      # harde cap verlies per trade
+COOLDOWN_S    = env("COOLDOWN_S", "60", int)
+DRY_RUN       = env("DRY_RUN", "true", bool)
 
-# -------- Utils --------
-def load_symbols():
-    markets = ex.load_markets()
-    if PAIR.strip().lower() == "all":
-        # alleen USD‑pairs; skip illiquid delisteds
-        return [s for s,m in markets.items() if "/USD" in s and m.get("active", True)]
-    if "," in PAIR:
-        wanted = [x.strip() for x in PAIR.split(",")]
-        return [s for s in wanted if s in markets]
-    return [PAIR] if PAIR in markets else []
+# ---------- exchange ----------
+ex = ccxt.krakenfutures({'apiKey':API_KEY,'secret':API_SECRET}) if FUTURES \
+   else ccxt.kraken({'apiKey':API_KEY,'secret':API_SECRET,'enableRateLimit':True})
+ex.load_markets()
 
-def last_price(sym): return float(ex.fetch_ticker(sym)["last"])
+# normaliseer pair voor futures (Kraken Futures gebruikt :USD)
+if FUTURES and (":USD" not in PAIR):
+    base, quote = PAIR.split("/")
+    PAIR = f"{base}/USD:USD"
 
-def usd_to_amount(sym, usd):
-    px = last_price(sym)
-    qty = usd / px
-    try:
-        m = ex.market(sym)
-        prec = m.get("precision", {}).get("amount")
-        qty = round(qty, prec if prec is not None else 4)
-        min_amt = float(m.get("limits", {}).get("amount", {}).get("min", 0.0) or 0.0)
-        if min_amt: qty = max(qty, min_amt)
-    except Exception:
-        qty = max(round(qty, 4), 0.0001)
-    return float(qty)
+def fetch_ohlcv(symbol, tf, limit=200):
+    ohlc = ex.fetch_ohlcv(symbol, timeframe=tf, limit=limit)
+    o,h,l,c,v = zip(*ohlc)
+    return list(o), list(h), list(l), list(c), list(v)
 
-# -------- Signal: 15m breakout + EMA filter --------
-def breakout_signal(sym):
-    ohlc = ex.fetch_ohlcv(sym, timeframe=TIMEFRAME, limit=60)
-    if not ohlc or len(ohlc) < 40:
-        return False
-    closes = [c[4] for c in ohlc]
-    ema_fast = ema(closes, 12)
-    ema_slow = ema(closes, 26)
-    last_close = closes[-1]
-    prev_high = max(c[2] for c in ohlc[-21:-1])  # high van vorige 20 candles
-    trend_ok = ema_fast[-1] > ema_slow[-1]
-    return last_close > prev_high and trend_ok
+def price(symbol):
+    return float(ex.fetch_ticker(symbol)['last'])
 
-# -------- Orders + trailing --------
-def place_orders(sym, side, entry_px, amount):
-    tp_px = round(entry_px * (1 + TP_PCT/100.0), 6)
-    sl_px = round(entry_px * (1 - SL_PCT/100.0), 6)
-    print(f"[{now()}] ENTRY {side} {amount} {sym} @ {entry_px:.6f} | TP={tp_px} SL={sl_px} trail={TRAIL_PCT}%")
-    if DRY_RUN:
-        return {"entry_px":entry_px,"tp_px":tp_px,"sl_px":sl_px,"amount":amount,"best":entry_px,"ids":{}}
+def usd_to_amount(symbol, usd):
+    px = price(symbol)
+    amt = max(round(usd / px, 6), 0.000001)
+    return amt
 
+def cap_amount_by_risk(symbol, amt, atr_val):
+    px = price(symbol)
+    # afstand tot initial SL (ATR_MULT * ATR) in prijs-termen
+    risk_per_unit = ATR_MULT * atr_val
+    # verlies in USD ≈ risk_per_unit * amt (in base) * px/base?
+    # risk_per_unit is in "prijs" (USD), dus verlies ≈ amt * risk_per_unit
+    # (amt is base; risk_per_unit al in USD => verlies in USD = amt * risk_per_unit)
+    if amt * risk_per_unit > MAX_LOSS_USD:
+        amt = MAX_LOSS_USD / max(risk_per_unit, 1e-12)
+    return round(max(amt, 0.000001), 6)
+
+def place_entry(side, amt, px=None):
     params = {}
-    if FUTURES: params["leverage"] = LEVERAGE
-
-    # Entry
+    if FUTURES: params['reduceOnly'] = False
     if ORDER_TYPE == "limit":
-        px = entry_px * (1 - LIMIT_OFF_PCT/100.0)
-        entry = ex.create_order(sym, "limit", side, amount, round(px,6), {**params,"postOnly":True})
+        if side=="buy":
+            limit_px = px * (1 - LIMIT_BPS/10000.0)
+        else:
+            limit_px = px * (1 + LIMIT_BPS/10000.0)
+        order = {"id":"dry"} if DRY_RUN else ex.create_order(PAIR, 'limit', side, amt, round(limit_px, 6), params)
+        return order, limit_px
     else:
-        entry = ex.create_order(sym, "market", side, amount, None, params)
+        order = {"id":"dry"} if DRY_RUN else ex.create_order(PAIR, 'market', side, amt, None, params)
+        return order, px
 
-    # Exits (reduce only als futures)
-    reduce = {"reduceOnly": True} if FUTURES else {}
-    close_side = "sell" if side=="buy" else "buy"
+def place_stop(side, amt, stop_px):
+    # side hier is TEGENOVERGESTELD van entry om te sluiten
+    params = {'reduceOnly': True} if FUTURES else {}
+    typ = 'stop'  # krakenfutures: 'stop' met triggerPrice
+    args = {**params, 'triggerPrice': round(stop_px, 6)}
+    order = {"id":"dry"} if DRY_RUN else ex.create_order(PAIR, typ, side, amt, None, args)
+    return order
 
-    tp = ex.create_order(sym, "limit", close_side, amount, tp_px, {**reduce})
-    sl = ex.create_order(sym, "stop",  close_side, amount, sl_px, {**reduce, "triggerPrice": sl_px})
+def replace_stop(old_id, side, amt, new_px):
+    if not DRY_RUN:
+        try:
+            ex.cancel_order(old_id, PAIR)
+        except Exception:
+            pass
+    return place_stop(side, amt, new_px)
 
-    return {"entry_px":entry_px,"tp_px":tp_px,"sl_px":sl_px,"amount":amount,"best":entry_px,
-            "ids":{"entry":entry.get("id"),"tp":tp.get("id"),"sl":sl.get("id")}}
-
-def manage_trailing(sym, state):
-    px = last_price(sym)
-    # update best en verschuif trailing SL alleen omhoog (long)
-    if px > state["best"]:
-        state["best"] = px
-        new_sl = round(state["best"] * (1 - TRAIL_PCT/100.0), 6)
-        if new_sl > state["sl_px"]:
-            print(f"[{now()}] TRAIL {sym}: SL {state['sl_px']} → {new_sl}")
-            state["sl_px"] = new_sl
-            if not DRY_RUN:
-                try:
-                    if state["ids"].get("sl"):
-                        ex.cancel_order(state["ids"]["sl"], sym)
-                except Exception:
-                    pass
-                sl_side = "sell"  # long only op spot
-                sl = ex.create_order(sym, "stop", sl_side, state["amount"], new_sl,
-                                     {"triggerPrice": new_sl, **({"reduceOnly": True} if FUTURES else {})})
-                state["ids"]["sl"] = sl.get("id")
-
-# -------- Main loop --------
 def run():
-    symbols = load_symbols()
-    if not symbols: raise RuntimeError("Geen USD‑pairs gevonden. Check PAIR/env.")
-    print(f"=== {now()} • Kraken • Pairs={symbols} • Futures={FUTURES} • Lev={LEVERAGE}x • DRY_RUN={DRY_RUN}")
-    last_trade = {s:0 for s in symbols}
-    active = {s:None for s in symbols}
+    print(f"=== {now()} • Start • Pair={PAIR} • Futures={FUTURES} • DRY_RUN={DRY_RUN}")
+    in_position = False
+    pos = {}  # entry_px, side, amt, stop_id, stop_px, best
 
     while True:
         try:
-            for s in symbols:
-                if active[s]:  # trailing beheren
-                    manage_trailing(s, active[s])
+            # --------- data & indicatoren ----------
+            _, H, L, C, _ = fetch_ohlcv(PAIR, TIMEFRAME, limit=max(EMA_N, DONCHIAN_N)+ATR_N+5)
+            last = C[-1]
+            ema200 = ema(C, EMA_N)[-1]
+            atr = atr_from_ohlcv(H, L, C, ATR_N)[-1]
+            d_high, d_low = donchian(H, L, DONCHIAN_N)
 
-                if time.time()-last_trade[s] < COOLDOWN_S:
-                    continue
+            want_long = (last > d_high) and (last > ema200)
+            want_short = FUTURES and (last < d_low) and (last < ema200)
 
-                # spot = long‑only; futures kan uitgebreid worden naar short
-                if breakout_signal(s):
-                    px = last_price(s)
-                    amt = usd_to_amount(s, BASE_SIZE_USD)
-                    state = place_orders(s, "buy", px, amt)
-                    active[s] = state
-                    last_trade[s] = time.time()
+            # --------- entry ----------
+            if not in_position and (want_long or want_short):
+                side = "buy" if want_long else "sell"
+                opp_side = "sell" if side=="buy" else "buy"
+
+                # basisgrootte + risicocap
+                amt = usd_to_amount(PAIR, BASE_SIZE_USD)
+                amt = cap_amount_by_risk(PAIR, amt, atr)
+
+                entry_px = price(PAIR)
+                entry_order, eff_px = place_entry(side, amt, entry_px)
+
+                # initial SL (Chandelier basis)
+                if side == "buy":
+                    stop_px = eff_px - ATR_MULT*atr
+                    best_px = eff_px
+                else:
+                    stop_px = eff_px + ATR_MULT*atr
+                    best_px = eff_px
+
+                stop = place_stop(opp_side, amt, stop_px)
+
+                pos = dict(entry_px=eff_px, side=side, amt=amt,
+                           stop_id=stop["id"], stop_px=stop_px, best=best_px)
+                in_position = True
+                print(f"[{now()}] ENTRY {side} {amt} {PAIR} @ {round(eff_px,6)}  SL={round(stop_px,6)} (ATR={round(atr,6)})")
+
+            # --------- trailing stop ----------
+            if in_position:
+                px = price(PAIR)
+                side = pos["side"]
+                opp  = "sell" if side=="buy" else "buy"
+
+                moved = False
+                if side=="buy":
+                    if px > pos["best"]:
+                        pos["best"] = px
+                        moved = True
+                    new_sl = pos["best"] - ATR_MULT*atr
+                    if new_sl > pos["stop_px"] + 1e-6:
+                        pos["stop_id"] = replace_stop(pos["stop_id"], opp, pos["amt"], new_sl)["id"]
+                        print(f"[{now()}] TRAIL SL {round(pos['stop_px'],6)} -> {round(new_sl,6)}  (best={round(pos['best'],6)})")
+                        pos["stop_px"] = new_sl
+                else:
+                    if px < pos["best"]:
+                        pos["best"] = px
+                        moved = True
+                    new_sl = pos["best"] + ATR_MULT*atr
+                    if new_sl < pos["stop_px"] - 1e-6:
+                        pos["stop_id"] = replace_stop(pos["stop_id"], opp, pos["amt"], new_sl)["id"]
+                        print(f"[{now()}] TRAIL SL {round(pos['stop_px'],6)} -> {round(new_sl,6)}  (best={round(pos['best'],6)})")
+                        pos["stop_px"] = new_sl
+
+                # simpele exit-detectie: als prijs SL raakt, ga uit positie (we poll'en, dus benaderen)
+                hit = (side=="buy" and px <= pos["stop_px"]) or (side=="sell" and px >= pos["stop_px"])
+                if hit:
+                    print(f"[{now()}] EXIT by SL @~{round(pos['stop_px'],6)} (px={round(px,6)})")
+                    in_position = False
+                    pos = {}
 
             time.sleep(3)
+
         except Exception as e:
-            print(f"[{now()}] Fout: {e}")
+            print(f"[{now()}] Error: {e}")
             time.sleep(COOLDOWN_S)
 
 if __name__ == "__main__":
