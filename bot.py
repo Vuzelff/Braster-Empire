@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-# Kraken USD-only Multi‑Pair Bot • ccxt
-# - scant USD paren (NO USDT)
+# Braster Empire — Kraken USD‑only Multi‑Pair Bot
+# - scant ALLE /USD pairs (NO USDT)
 # - 15m breakout + EMA(12/26) trendfilter
-# - TP/SL + ALTijd‑aan trailing stop (softwarematig)
-# - DRY_RUN standaard aan (veilig testen)
+# - TP/SL + altijd‑aan trailing stop (softwarematig)
+# - ccxt is de enige dependency
+
 import os, time
 from datetime import datetime
 import ccxt
@@ -28,11 +29,11 @@ def ema(vals, n):
 # -------- ENV --------
 API_KEY        = env("KRAKEN_API_KEY")
 API_SECRET     = env("KRAKEN_API_SECRET")
-PAIR           = env("PAIR", "all")             # "all" of bv "BTC/USD,ETH/USD"
-FUTURES        = env("FUTURES", "false", bool)
+PAIR           = env("PAIR", "all")             # "all" of bv "BTC/USD,ETH/USD,XRP/USD"
+FUTURES        = env("FUTURES", "false", bool)  # spot long‑only; futures = short/lev mogelijk
 LEVERAGE       = env("LEVERAGE", "1", float)
-BASE_SIZE_USD  = env("BASE_SIZE_USD", "50", float)
 
+BASE_SIZE_USD  = env("BASE_SIZE_USD", "50", float)
 TIMEFRAME      = env("TIMEFRAME", "15m")
 TP_PCT         = env("TP_PCT", "1.5", float)    # take profit %
 SL_PCT         = env("SL_PCT", "0.7", float)    # stop loss %
@@ -40,7 +41,7 @@ TRAIL_PCT      = env("TRAIL_PCT", "0.3", float) # trailing afstand %
 ORDER_TYPE     = env("ORDER_TYPE", "limit")     # limit/market
 LIMIT_OFF_PCT  = env("LIMIT_OFFSET_PCT", "0.03", float)  # limit beter dan last
 COOLDOWN_S     = env("COOLDOWN_S", "60", int)
-DRY_RUN        = env("DRY_RUN", "true", bool)
+DRY_RUN        = env("DRY_RUN", "true", bool)   # zet op false voor live
 
 # -------- Exchange --------
 ex = ccxt.krakenfutures({'apiKey':API_KEY,'secret':API_SECRET,'enableRateLimit':True}) if FUTURES else \
@@ -50,7 +51,8 @@ ex = ccxt.krakenfutures({'apiKey':API_KEY,'secret':API_SECRET,'enableRateLimit':
 def load_symbols():
     markets = ex.load_markets()
     if PAIR.strip().lower() == "all":
-        return [s for s in markets if "/USD" in s and markets[s].get("active", True)]
+        # alleen USD‑pairs; skip illiquid delisteds
+        return [s for s,m in markets.items() if "/USD" in s and m.get("active", True)]
     if "," in PAIR:
         wanted = [x.strip() for x in PAIR.split(",")]
         return [s for s in wanted if s in markets]
@@ -64,10 +66,9 @@ def usd_to_amount(sym, usd):
     try:
         m = ex.market(sym)
         prec = m.get("precision", {}).get("amount")
-        if prec is not None: qty = round(qty, prec)
-        else: qty = round(qty, 4)
-        min_amt = m.get("limits", {}).get("amount", {}).get("min", 0.0) or 0.0
-        if min_amt: qty = max(qty, float(min_amt))
+        qty = round(qty, prec if prec is not None else 4)
+        min_amt = float(m.get("limits", {}).get("amount", {}).get("min", 0.0) or 0.0)
+        if min_amt: qty = max(qty, min_amt)
     except Exception:
         qty = max(round(qty, 4), 0.0001)
     return float(qty)
@@ -75,8 +76,9 @@ def usd_to_amount(sym, usd):
 # -------- Signal: 15m breakout + EMA filter --------
 def breakout_signal(sym):
     ohlc = ex.fetch_ohlcv(sym, timeframe=TIMEFRAME, limit=60)
+    if not ohlc or len(ohlc) < 40:
+        return False
     closes = [c[4] for c in ohlc]
-    if len(closes) < 40: return False
     ema_fast = ema(closes, 12)
     ema_slow = ema(closes, 26)
     last_close = closes[-1]
@@ -88,20 +90,24 @@ def breakout_signal(sym):
 def place_orders(sym, side, entry_px, amount):
     tp_px = round(entry_px * (1 + TP_PCT/100.0), 6)
     sl_px = round(entry_px * (1 - SL_PCT/100.0), 6)
-    print(f"[{now()}] ENTRY {side} {amount} {sym} @ {entry_px} | TP={tp_px} SL={sl_px} trail={TRAIL_PCT}%")
+    print(f"[{now()}] ENTRY {side} {amount} {sym} @ {entry_px:.6f} | TP={tp_px} SL={sl_px} trail={TRAIL_PCT}%")
     if DRY_RUN:
         return {"entry_px":entry_px,"tp_px":tp_px,"sl_px":sl_px,"amount":amount,"best":entry_px,"ids":{}}
 
     params = {}
     if FUTURES: params["leverage"] = LEVERAGE
+
+    # Entry
     if ORDER_TYPE == "limit":
         px = entry_px * (1 - LIMIT_OFF_PCT/100.0)
-        entry = ex.create_order(sym, "limit", side, amount, px, {**params,"postOnly":True})
+        entry = ex.create_order(sym, "limit", side, amount, round(px,6), {**params,"postOnly":True})
     else:
         entry = ex.create_order(sym, "market", side, amount, None, params)
 
+    # Exits (reduce only als futures)
     reduce = {"reduceOnly": True} if FUTURES else {}
     close_side = "sell" if side=="buy" else "buy"
+
     tp = ex.create_order(sym, "limit", close_side, amount, tp_px, {**reduce})
     sl = ex.create_order(sym, "stop",  close_side, amount, sl_px, {**reduce, "triggerPrice": sl_px})
 
@@ -110,6 +116,7 @@ def place_orders(sym, side, entry_px, amount):
 
 def manage_trailing(sym, state):
     px = last_price(sym)
+    # update best en verschuif trailing SL alleen omhoog (long)
     if px > state["best"]:
         state["best"] = px
         new_sl = round(state["best"] * (1 - TRAIL_PCT/100.0), 6)
@@ -122,7 +129,7 @@ def manage_trailing(sym, state):
                         ex.cancel_order(state["ids"]["sl"], sym)
                 except Exception:
                     pass
-                sl_side = "sell"  # long only (spot)
+                sl_side = "sell"  # long only op spot
                 sl = ex.create_order(sym, "stop", sl_side, state["amount"], new_sl,
                                      {"triggerPrice": new_sl, **({"reduceOnly": True} if FUTURES else {})})
                 state["ids"]["sl"] = sl.get("id")
@@ -138,19 +145,20 @@ def run():
     while True:
         try:
             for s in symbols:
-                # trailing beheren
-                if active[s]: manage_trailing(s, active[s])
+                if active[s]:  # trailing beheren
+                    manage_trailing(s, active[s])
 
-                # cooldown
-                if time.time()-last_trade[s] < COOLDOWN_S: continue
+                if time.time()-last_trade[s] < COOLDOWN_S:
+                    continue
 
-                # alleen LONG breakout (veilig voor spot)
+                # spot = long‑only; futures kan uitgebreid worden naar short
                 if breakout_signal(s):
                     px = last_price(s)
                     amt = usd_to_amount(s, BASE_SIZE_USD)
                     state = place_orders(s, "buy", px, amt)
                     active[s] = state
                     last_trade[s] = time.time()
+
             time.sleep(3)
         except Exception as e:
             print(f"[{now()}] Fout: {e}")
