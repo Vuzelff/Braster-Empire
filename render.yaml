@@ -1,0 +1,35 @@
+services:
+  - type: worker
+    name: braster-empire-bot
+    env: docker
+    plan: starter          # of 'standard' als je meer power wil
+    autoDeploy: true
+    # Dockerfile in de root wordt automatisch gebruikt
+    envVars:
+      # zet values in het Render dashboard (sync:false => geheimen blijven daar)
+      - key: KRAKEN_API_KEY
+        sync: false
+      - key: KRAKEN_API_SECRET
+        sync: false
+      - key: PAIRS
+        sync: false
+      - key: TIMEFRAME
+        sync: false
+      - key: FAST_EMA
+        sync: false
+      - key: SLOW_EMA
+        sync: false
+      - key: REQUIRE_EMA200
+        sync: false
+      - key: BASE_SIZE_USD
+        sync: false
+      - key: TP_PCT
+        sync: false
+      - key: SL_PCT
+        sync: false
+      - key: TRAIL_PCT
+        sync: false
+      - key: COOLDOWN_S
+        sync: false
+      - key: DRY_RUN
+        sync: false
