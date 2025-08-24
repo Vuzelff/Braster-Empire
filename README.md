@@ -1,4 +1,3 @@
-
 # Braster Empire Bot (Kraken + ccxt)
 
 Eenvoudige, robuuste momentum‑bot met **EMA(50) > EMA(200)** als signaal, 
