@@ -1,7 +1,7 @@
-# Dockerfile voor Braster-Empire Bot
+# Dockerfile voor Braster‑Empire Bot
 FROM python:3.11-slim
 
-# Zorg dat Python niet buffert (handig voor logs)
+# Python niet bufferen (betere logs)
 ENV PYTHONUNBUFFERED=1
 
 # Werkdirectory in de container
@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy alle bestanden
+# Copy alle projectbestanden
 COPY . .
 
 # Start de bot
