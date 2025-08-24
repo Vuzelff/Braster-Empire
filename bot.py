@@ -23,7 +23,7 @@ load_dotenv()
 # ========= ENVIRONMENT VARIABELEN =========
 API_KEY        = os.getenv("KRAKEN_API_KEY", "")
 API_SECRET     = os.getenv("KRAKEN_API_SECRET", "")
-PAIRS_RAW      = os.getenv("PAIRS", "BTC/USD,ETH/USD,ADA/USD")
+PAIRS_RAW      = os.getenv("PAIRS", "BTC/USD,ETH/USD,ADA/USD,XRP/USD")
 TIMEFRAME      = os.getenv("TIMEFRAME", "15m")
 FAST_EMA       = int(os.getenv("FAST_EMA", 20))
 SLOW_EMA       = int(os.getenv("SLOW_EMA", 50))
