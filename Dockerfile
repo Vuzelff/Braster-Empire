@@ -1,4 +1,4 @@
- 33z    # Dockerfile voor Braster-Empire Bot
+# Dockerfile voor Braster-Empire Bot
 FROM python:3.11-slim
 
 # Zorg dat Python niet buffert (handig voor logs)
