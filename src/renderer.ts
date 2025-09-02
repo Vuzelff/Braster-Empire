@@ -55,8 +55,7 @@ function updateUI() {
   }
   
   // Update stats
-  const statValue = document.querySelector('.stat-value') as HTMLElement;
-  const tradesValue = document.querySelectorAll('.stat-value')[1] as HTMLElement;
+  const tradesValue = document.querySelector('.stat-value[data-stat="trades"]') as HTMLElement;
   
   if (statValue) {
     statValue.textContent = `$${state.pnl.toFixed(2)}`;
