@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Braster Empire - Trading Bot Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  </head>
+  <body>
+    <div class="app-container">
+      <header class="app-header">
+        <h1>🚀 Braster Empire</h1>
+        <p class="subtitle">Futures Trading Bot Dashboard</p>
+      </header>
+      
+      <main class="main-content">
+        <div class="dashboard-grid">
+          <div class="card">
+            <h3>Bot Status</h3>
+            <div class="status-indicator">
+              <span class="status-dot offline"></span>
+              <span>Offline</span>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Active Pairs</h3>
+            <div class="pair-list">
+              <span class="pair-tag">BTC/USD</span>
+              <span class="pair-tag">ETH/USD</span>
+              <span class="pair-tag">SOL/USD</span>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Configuration</h3>
+            <div class="config-item">
+              <label>Timeframe:</label>
+              <span>15m</span>
+            </div>
+            <div class="config-item">
+              <label>Leverage:</label>
+              <span>10x</span>
+            </div>
+            <div class="config-item">
+              <label>Base Size:</label>
+              <span>$25</span>
+            </div>
+          </div>
+          
+          <div class="card">
+            <h3>Performance</h3>
+            <div class="performance-stats">
+              <div class="stat">
+                <span class="stat-value">$0.00</span>
+                <span class="stat-label">Total P&L</span>
+              </div>
+              <div class="stat">
+                <span class="stat-value">0</span>
+                <span class="stat-label">Trades Today</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="controls-section">
+          <button class="btn btn-primary" id="start-bot">Start Bot</button>
+          <button class="btn btn-secondary" id="stop-bot" disabled>Stop Bot</button>
+          <button class="btn btn-info" id="view-logs">View Logs</button>
+        </div>
+      </main>
+    </div>
+    
+    <script type="module" src="/src/renderer.ts"></script>
+  </body>
+</html>
