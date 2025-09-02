@@ -63,8 +63,8 @@ app.on('activate', () => {
 
 // Security: Prevent new window creation
 app.on('web-contents-created', (event, contents) => {
-  contents.on('new-window', (navigationEvent) => {
-    navigationEvent.preventDefault();
+  contents.setWindowOpenHandler(() => {
+    return { action: 'deny' };
   });
 });
 
